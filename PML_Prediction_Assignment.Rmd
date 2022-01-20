@@ -1,0 +1,146 @@
+---
+title: "PML_PredictionAssignment"
+author: "Ben Marshall"
+date: "26/12/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+# Introduction
+The goal of this project is to predict the manner in which 6 participants exercised as measured by various accelerometers on their body. This requires building a machine learning model from a training set of 19,622 observations and applying the model to predict on a sample of 20 observations. This report describes how I built my model, how I used cross validation, what I expected the out of sample error to be, and details why I made the choices I did along the way.
+
+# Set up
+## Import data and load required packages
+
+First, I need to load in the required data and the r packages I will be using.
+
+```{r data ingest and load packages, message=FALSE}
+library(caret)
+library(ggplot2)
+library(AppliedPredictiveModeling)
+library(knitr)
+library(data.table)
+library(dplyr)
+library(corrplot)
+library(rattle)
+
+download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv', 'pml-training.csv', method = 'curl')
+
+download.file('https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv', 'pml-testing.csv', method = 'curl')
+
+training <- tbl_df(fread('pml-training.csv'))
+validation <- tbl_df(fread('pml-testing.csv'))
+```
+
+## Data cleaning and pre-processing
+
+There are 160 variables in both data sets. Some of which are mostly N/As, others contain metadata such as ID numbers, information which is not useful to the model, others have near zero variances. The following code removes all these variables from the model, reducing it to 54 variables
+
+```{r cleaning data}
+#removes metadata
+training <- training[, -(1:6)]
+validation  <- validation[, -(1:6)]
+
+#removes variables with near zero variance 
+nzv <- nearZeroVar(training, names = TRUE)
+training <- select(training, -all_of(nzv))
+validation  <- select(validation, -all_of(nzv))
+
+#removes variables with >90% missing data
+NAvariables <- sapply(training, function(x) mean(is.na(x))) > 0.90
+training <- training[, NAvariables==FALSE]
+validation  <- validation[, NAvariables==FALSE]
+
+#ensure dependent variable is in the right format
+training$classe <- as.factor(training$classe)
+```
+
+Highly correlated variables can introduce bias to the model. There are a number of ways to deal with this. First, Principal Components analysis can help to remove these correlated variables by creating a set of uncorrelated 'factors' that explain the majority of the variance. However, in this instance I'm just going to look for pairs of variables that correlate above 0.95, and discard one of the these using the findCorrelation function. This reduces the number of variables to 50.
+
+```{r Remove correlated variables}
+corMatrix <- cor(training[, -54])
+corrplot(corMatrix, order = "FPC", method = "color", type = "lower", 
+         tl.cex = 0.8, tl.col = rgb(0, 0, 0))
+
+exclVs <- findCorrelation(corMatrix, cutoff = 0.95, verbose = FALSE, names = T, exact = ncol(corMatrix) < 100)
+training_nocorr <- select(training,-exclVs)
+```
+
+##Cross-Validation and Out of Sample Error
+
+### Splitting the training set.
+The methods chosen make use of cross-validation techniques via the trainControl function when building the models. However, to ensure accurate estimates of out of sample error, I chose to also break the training sample into a training set (70%) and a test set (30%) so that I could test the models generated on entirely 'new' data. The out of sample error can then be estimated as 1-accuracy of the models.
+
+```{r split training}
+set.seed(2651)
+training_split <- createDataPartition(y = training_nocorr$classe,
+                                   p = 0.7,
+                                   list = FALSE)
+training_set <- training_nocorr[training_split,]
+test_set <- training_nocorr[-training_split,]
+```
+
+
+## Analysis
+I chose to test three prediction models and to choose the one with the greatest accuracy / least out of sample error. The models chosen were: Classification Tree Method, Random Forest, and Generalised Boosted Model. 
+
+### Classification Tree Method
+
+```{r Classification Tree}
+set.seed(15423) # the same seed is set for each model to facilitate a fair comparison
+trControl <- trainControl(method="cv", number=5) 
+ct_model <- train(classe~., method="rpart", data=training_set, trControl=trControl)
+fancyRpartPlot(ct_model$finalModel)
+
+```
+
+
+```{r Classification Tree Accuracy}
+predict_tree <- predict(ct_model,newdata=test_set)
+confMatClassTree <- confusionMatrix(test_set$classe,predict_tree)
+confMatClassTree
+```
+
+The classification tree produced a model that was only 52.78% accurate (out of sample error of 47.22%).
+
+### Random Forest Method
+
+```{r Random Forest}
+set.seed(15423)
+rf_control <- trainControl(method="cv", number=3, verboseIter=FALSE)
+rf_model <- train(classe ~ ., data=training_set, method="rf", trControl=rf_control)
+predict_rf <- predict(rf_model,newdata=test_set)
+confMatRF <- confusionMatrix(test_set$classe,predict_rf)
+confMatRF
+```
+
+The Random Forest method produced very high accuracy rate of 99.81% accurate (out of sample error of 0.19%). This will be hard to beat.
+
+### Generalised Boosting Method
+
+```{r Boosting}
+set.seed(15423)
+gbm_control <- trainControl(method = "repeatedcv", number = 5, repeats = 1)
+gbm_model <- train( classe ~.,
+                  data = training_set,
+                  method = "gbm",
+                  trControl = gbm_control,
+                  verbose = FALSE)
+predict_gbm <- predict(gbm_model,newdata=test_set)
+confMatGBM <- confusionMatrix(test_set$classe,predict_gbm)
+confMatGBM
+
+```
+
+The Generalized Boosted Model also produced very high accuracy of 98.66% accurate (out of sample error of 1.34%).
+
+##Comparing Models
+The random forest has marginally better performance accuracy than the generalized boosted model (accuracy = 99.81% vs 98.66% respectively), both of which perform significantly better than the Classification Tree (accuracy = 52.78%). We could ensemble the Random Forest and Generalised Booster method but with accuracy rates this high, this is not necessary. With the highest accuracy rate, I will go with the Random Forest classifier to make the final predictions.
+
+```{r final prediction}
+validation_test_rf <- predict(rf_model,validation)
+print(validation_test_rf)
+```
+
